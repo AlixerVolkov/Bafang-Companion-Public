@@ -14,7 +14,6 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -24,11 +23,10 @@ import java.security.MessageDigest
 import java.util.concurrent.Executors
 
 /**
- * First-party signed GitHub Release update channel (public anonymously, private with PAT).
- * - No privileged/silent installation: Android presents its normal package installer.
- * - Only a private repository needs a read-only fine-grained GitHub PAT, encrypted by Android Keystore.
- * - VersionCode, package name, SHA-256 and signing certificate are checked before installing.
- * - The PAT is sent ONLY to api.github.com, never through any download redirect.
+ * Tokenless first-party update channel. Only public GitHub Releases are queried,
+ * and Android's system package installer always requires explicit user consent.
+ * APK size, SHA-256, package ID, increasing versionCode and original signing
+ * certificate are verified before opening the installer.
  */
 class GitHubUpdater(private val activity: Activity, private val notify: (String) -> Unit) {
     private val main = Handler(Looper.getMainLooper())
@@ -229,7 +227,7 @@ class GitHubUpdater(private val activity: Activity, private val notify: (String)
             val apiHost = hostname == "api.github.com"
             if (!apiHost && !hostname.endsWith(".githubusercontent.com") && hostname != "github.com")
                 throw IOException("Descarga redirigida fuera de GitHub")
-            // Public releases have stable github.com download URLs; private assets use api.github.com.
+            // Public assets must originate from the configured GitHub release channel.
             if (!apiHost && redirects == 0 && !location.startsWith(
                     "https://github.com/AlixerVolkov/Bafang-Companion-Public/releases/download/"))
                 throw IOException("Origen de descarga inesperado")
