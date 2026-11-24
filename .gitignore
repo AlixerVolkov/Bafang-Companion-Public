@@ -1,0 +1,19 @@
+.gradle/
+.idea/
+**/build/
+local.properties
+*.apk
+*.aab
+*.iml
+*.jks
+*.keystore
+captures/
+*.hci
+*.btsnoop
+*.log
+
+# Never commit app signing credentials
+.ci/
+*.p12
+*.p12.b64
+*.properties.secret
