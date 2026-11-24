@@ -11,10 +11,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
-import android.text.InputType
-import android.widget.EditText
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import org.json.JSONArray
@@ -24,14 +20,8 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.KeyStore
 import java.security.MessageDigest
-import java.util.Base64
 import java.util.concurrent.Executors
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
 /**
  * First-party signed GitHub Release update channel (public anonymously, private with PAT).
@@ -48,11 +38,8 @@ class GitHubUpdater(private val activity: Activity, private val notify: (String)
     private val prefs = activity.getSharedPreferences("bafang_update", Context.MODE_PRIVATE)
     private val api = "https://api.github.com/repos/AlixerVolkov/Bafang-Companion-Public"
     private val releasePrefix = "bafang-companion-v"
-    private val keyAlias = "bafang-companion-github-token-v1"
     private var pendingApk: File? = null
     private var busy = false
-    // Empty for public Releases; used only as fallback for private repository access.
-    private var releaseAuthToken: String = ""
 
     data class Release(val code: Long, val name: String, val assetId: Long,
                        val size: Long, val sha256: String, val notes: String)
@@ -60,49 +47,12 @@ class GitHubUpdater(private val activity: Activity, private val notify: (String)
     private fun onUi(action: () -> Unit) = main.post(action)
     private fun report(message: String) = onUi { notify(message) }
 
-    fun hasToken(): Boolean = prefs.contains("pat_v1")
-
-    fun configure() {
-        val input = EditText(activity).apply {
-            hint = "github_pat_…"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setSingleLine(true)
-            setPadding(40, 28, 40, 28)
-        }
-        AlertDialog.Builder(activity)
-            .setTitle("GitHub · token opcional")
-            .setMessage("Para un repositorio público no se necesita clave. Si el repositorio es privado, usa un token de solo lectura (Contents: Read), cifrado en este teléfono.")
-            .setView(input)
-            .setPositiveButton("Guardar") { _, _ ->
-                val candidate = input.text.toString().trim()
-                if (candidate.isEmpty() || candidate.length < 16 || candidate.any { it.isWhitespace() }) {
-                    report("Token vacío o inválido; no se guardó")
-                } else background.execute {
-                    try {
-                        // Verify the credential BEFORE storing it: 404 means no repo access.
-                        val response = getJson("$api", candidate)
-                        if (response.optString("full_name") != "AlixerVolkov/Bafang-Companion")
-                            throw IOException("El token no tiene acceso al repositorio esperado")
-                        saveToken(candidate)
-                        report("GitHub configurado: acceso privado de solo lectura correcto")
-                        check(manual = true)
-                    } catch (e: Exception) { report("No se guardó el token: ${explain(e)}") }
-                }
-            }
-            .setNeutralButton("Borrar clave") { _, _ ->
-                prefs.edit().remove("pat_v1").apply()
-                report("Credencial de GitHub borrada de la app")
-            }
-            .setNegativeButton("Cancelar", null).show()
-    }
-
     fun check(manual: Boolean = true) {
         synchronized(this) { if (busy) return; busy = true }
         background.execute {
             try {
                 // Always use the public GitHub Releases API anonymously.
-                val releases = getArray("$api/releases?per_page=30", "")
-                releaseAuthToken = ""
+                val releases = getArray("$api/releases?per_page=30")
                 val latest = findLatest(releases)
                 val current = installedVersion()
                 if (latest == null) {
@@ -171,16 +121,14 @@ class GitHubUpdater(private val activity: Activity, private val notify: (String)
         background.execute {
             var temp: File? = null
             try {
-                val token = releaseAuthToken
                 val dir = File(activity.cacheDir, "updates")
                 if (!dir.exists() && !dir.mkdirs()) throw IOException("No se pudo crear carpeta temporal")
                 temp = File(dir, "bafang-${release.code}.apk")
                 report("Descargando versión ${release.name}…")
                 val sha = MessageDigest.getInstance("SHA-256")
                 var bytes = 0L
-                val url = if (token.isNotBlank()) "$api/releases/assets/${release.assetId}"
-                    else "https://github.com/AlixerVolkov/Bafang-Companion-Public/releases/download/bafang-companion-v${release.name}/Bafang-Companion-${release.name}.apk"
-                val conn = connect(url, token, "application/octet-stream")
+                val url = "https://github.com/AlixerVolkov/Bafang-Companion-Public/releases/download/bafang-companion-v${release.name}/Bafang-Companion-${release.name}.apk"
+                val conn = connect(url, "application/octet-stream")
                 try {
                     if (conn.responseCode != 200) throw IOException("Descarga HTTP ${conn.responseCode}")
                     val mime = conn.contentType.orEmpty().lowercase()
@@ -272,7 +220,7 @@ class GitHubUpdater(private val activity: Activity, private val notify: (String)
             throw IOException("Firma distinta a la app instalada. Desinstala una vez la versión antigua si cambió la firma y vuelve a instalar la versión actual desde GitHub")
     }
 
-    private fun connect(url: String, token: String, accept: String): HttpURLConnection {
+    private fun connect(url: String, accept: String): HttpURLConnection {
         var location = url
         repeat(6) { redirects ->
             val link = URL(location)
@@ -292,7 +240,6 @@ class GitHubUpdater(private val activity: Activity, private val notify: (String)
                 setRequestProperty("Accept", accept)
                 setRequestProperty("User-Agent", "BafangCompanion/0.19.0")
                 setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-                if (apiHost && token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
             }
             when (val status = conn.responseCode) {
                 301,302,303,307,308 -> {
@@ -308,51 +255,12 @@ class GitHubUpdater(private val activity: Activity, private val notify: (String)
         throw IOException("Demasiadas redirecciones de GitHub")
     }
 
-    private fun getJson(url: String, token: String): JSONObject {
-        val conn = connect(url, token, "application/vnd.github+json")
-        try {
-            if (conn.responseCode != 200) throw IOException("Respuesta GitHub HTTP ${conn.responseCode}")
-            return JSONObject(conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText().take(2_000_000) })
-        } finally { conn.disconnect() }
-    }
-
-    private fun getArray(url: String, token: String): JSONArray {
-        val conn = connect(url, token, "application/vnd.github+json")
+    private fun getArray(url: String): JSONArray {
+        val conn = connect(url, "application/vnd.github+json")
         try {
             if (conn.responseCode != 200) throw IOException("Respuesta GitHub HTTP ${conn.responseCode}")
             return JSONArray(conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText().take(3_000_000) })
         } finally { conn.disconnect() }
-    }
-
-    private fun secretKey(): SecretKey {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val existing = store.getKey(keyAlias, null) as? SecretKey
-        if (existing != null) return existing
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        val spec = KeyGenParameterSpec.Builder(keyAlias,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setRandomizedEncryptionRequired(true).build()
-        generator.init(spec)
-        return generator.generateKey()
-    }
-
-    private fun saveToken(token: String) {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
-        val bytes = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
-        val packed = cipher.iv + bytes
-        prefs.edit().putString("pat_v1", Base64.getEncoder().encodeToString(packed)).apply()
-    }
-
-    private fun loadToken(): String {
-        val packed = prefs.getString("pat_v1", null) ?: throw IOException("Configura tu token en Actualizaciones")
-        val raw = Base64.getDecoder().decode(packed)
-        if (raw.size < 28) throw IOException("Token cifrado incompleto")
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, raw.copyOfRange(0, 12)))
-        return String(cipher.doFinal(raw.copyOfRange(12, raw.size)), Charsets.UTF_8)
     }
 
     private fun explain(e: Exception) = when (e) {
